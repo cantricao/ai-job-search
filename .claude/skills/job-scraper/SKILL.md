@@ -5,7 +5,7 @@ description: >
   (LinkedIn, local job boards, and any skills added with /add-portal). Deduplicates
   across runs. Triggers on: job scrape, find jobs, search jobs, new jobs, job search,
   scrape jobs, /scrape
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash(bun --version), Bash(python tools/job_key.py:*), Bash(python3 tools/job_key.py:*), Bash(python tools/scrape_state.py:*), Bash(python3 tools/scrape_state.py:*), WebFetch, WebSearch, Agent, AskUserQuestion
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash(bun --version), Bash(python tools/job_key.py:*), Bash(python3 tools/job_key.py:*), Bash(python tools/scrape_state.py:*), Bash(python3 tools/scrape_state.py:*), WebFetch, WebSearch, Agent, AskUserQuestion, mcp__claude_ai_Gmail__search_threads, mcp__claude_ai_Gmail__get_thread, mcp__claude_ai_Gmail__get_message
 ---
 
 # Job Scraper
@@ -86,6 +86,24 @@ Use `WebSearch` for:
 Use the site-specific query strings from `search-queries.md` directly as WebSearch queries for these portals.
 
 Tag each fallback result as WebSearch-sourced, keeping the portal tag when the fallback stands in for an installed portal whose CLI failed. Step 4 persists this as the entry's `source`, and Step 5 reports which portals ran on the fallback this run.
+
+#### 1d. Gmail Job-Alert Ingestion
+
+Seek, Indeed, and Jora are not scraped directly (see `search-queries.md` for why — robots.txt disallows it). Instead, this step reads the job-alert emails these platforms already send to your own inbox, plus LinkedIn's alert emails as a second channel alongside the `linkedin-search` CLI, plus Fuse Recruitment and Synergie (recruitment agencies with no CLI or public search API at all).
+
+**Account restriction (mandatory, never relaxed):** every Gmail query built in this step **must** include `deliveredto:[YOUR_EMAIL]`. See `CLAUDE.md`'s "Account Restriction (Gmail)" section. If a query scoped this way returns nothing, the fix is checking claude.ai → Settings → Connectors — never dropping or loosening this clause. This step is **read-only**: only `search_threads`, `get_thread`, and `get_message` — never label, draft, or delete anything.
+
+1. If the Gmail MCP tools (`mcp__claude_ai_Gmail__*`) are unavailable, skip this step entirely and note it in the Step 5 summary (same graceful-degradation pattern as missing `bun`).
+2. Read `.claude/skills/job-scraper/gmail-alert-sources.md` for the confirmed sender addresses, subject-line patterns (to exclude alert-creation receipts and marketing noise), and body-parsing anchors per platform. **Never guess a sender or body structure that file doesn't document** — if a platform is marked "not yet observed," skip it for this run and say so in the summary rather than inventing a parser.
+3. Build one query per run:
+   ```
+   deliveredto:[YOUR_EMAIL] in:inbox newer_than:14d {from:jobalerts-noreply@linkedin.com from:jobalert.indeed.com from:match.indeed.com from:s.seek.com.au from:jora.com from:no-reply@fuserecruitment.com}
+   ```
+   (Extend the sender OR-group as more platform senders are confirmed in `gmail-alert-sources.md`.)
+4. Call `search_threads` (`view: THREAD_VIEW_MINIMAL`, `pageSize: 50`), filter out threads whose subject matches a documented noise pattern (alert-creation receipts, marketing), then `get_thread` (`messageFormat: FULL_CONTENT`) on the remainder to get full bodies — classification requires the actual body, not the snippet. These per-thread fetches are independent of each other; run them in parallel where possible, same as Step 1b's CLI calls.
+5. Parse each remaining message per its platform's documented anchors in `gmail-alert-sources.md`, extracting one result per job: `title`, `company`, `location` (if present), `url`, `date` (if present, else null).
+6. For a LinkedIn alert email, extract the numeric ID from the `jobs/view/<id>` URL and feed it to the existing `linkedin-search` CLI's `detail <id>` command for the full description — no separate parsing logic needed for LinkedIn detail. When a run surfaces multiple LinkedIn alert emails, run these `detail` lookups in parallel too.
+7. Feed every result into the same pool as Step 1b's CLI results, tagged `"portal": "gmail:<platform>"` (`gmail:linkedin`, `gmail:indeed`, `gmail:seek`, `gmail:jora`, `gmail:fuse`, `gmail:synergie`) so Step 4's dedup and Step 4.75's health check apply unchanged.
 
 ### Step 2: Fetch & Parse
 
